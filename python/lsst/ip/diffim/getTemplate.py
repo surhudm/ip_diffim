@@ -121,29 +121,33 @@ class GetCoaddAsTemplateTask(pipeBase.Task):
                 a template coadd exposure assembled out of patches
             - ``sources`` :  None for this subtask
         """
-        skyMap = sensorRef.get(datasetType=self.config.coaddName + "Coadd_skyMap")
-        tractInfo, patchList, skyCorners = self.getOverlapPatchList(exposure, skyMap)
+        if exposure.getWcs() is None:
+            templateExposure = None
+            self.log.info("Exposure %s has no WCS, so cannot include in template.", sensorRef.dataId)
+        else:
+            skyMap = sensorRef.get(datasetType=self.config.coaddName + "Coadd_skyMap")
+            tractInfo, patchList, skyCorners = self.getOverlapPatchList(exposure, skyMap)
 
-        availableCoaddRefs = dict()
-        for patchInfo in patchList:
-            patchNumber = tractInfo.getSequentialPatchIndex(patchInfo)
-            patchArgDict = dict(
-                datasetType=self.getCoaddDatasetName() + "_sub",
-                bbox=patchInfo.getOuterBBox(),
-                tract=tractInfo.getId(),
-                patch="%s,%s" % (patchInfo.getIndex()[0], patchInfo.getIndex()[1]),
-                subfilter=0,
-                numSubfilters=self.config.numSubfilters,
+            availableCoaddRefs = dict()
+            for patchInfo in patchList:
+                patchNumber = tractInfo.getSequentialPatchIndex(patchInfo)
+                patchArgDict = dict(
+                    datasetType=self.getCoaddDatasetName() + "_sub",
+                    bbox=patchInfo.getOuterBBox(),
+                    tract=tractInfo.getId(),
+                    patch="%s,%s" % (patchInfo.getIndex()[0], patchInfo.getIndex()[1]),
+                    subfilter=0,
+                    numSubfilters=self.config.numSubfilters,
+                )
+
+                if sensorRef.datasetExists(**patchArgDict):
+                    self.log.info("Reading patch %s", patchArgDict)
+                    availableCoaddRefs[patchNumber] = patchArgDict
+
+            templateExposure = self.run(
+                tractInfo, patchList, skyCorners, availableCoaddRefs,
+                sensorRef=sensorRef, visitInfo=exposure.getInfo().getVisitInfo()
             )
-
-            if sensorRef.datasetExists(**patchArgDict):
-                self.log.info("Reading patch %s", patchArgDict)
-                availableCoaddRefs[patchNumber] = patchArgDict
-
-        templateExposure = self.run(
-            tractInfo, patchList, skyCorners, availableCoaddRefs,
-            sensorRef=sensorRef, visitInfo=exposure.getInfo().getVisitInfo()
-        )
         return pipeBase.Struct(exposure=templateExposure, sources=None)
 
     def runQuantum(self, exposure, butlerQC, skyMapRef, coaddExposureRefs):
@@ -177,49 +181,55 @@ class GetCoaddAsTemplateTask(pipeBase.Task):
             raise RuntimeError("Templates constructed from multiple Tracts not supported by this task. "
                                "Use GetMultiTractCoaddTemplateTask instead.")
 
-        detectorBBox = exposure.getBBox()
         detectorWcs = exposure.getWcs()
-        detectorCorners = detectorWcs.pixelToSky(geom.Box2D(detectorBBox).getCorners())
-        validPolygon = exposure.getInfo().getValidPolygon()
-        detectorPolygon = validPolygon if validPolygon else geom.Box2D(detectorBBox)
-
-        availableCoaddRefs = dict()
-        overlappingArea = 0
-        for coaddRef in coaddExposureRefs:
-            dataId = coaddRef.dataId
-            patchWcs = skyMap[dataId['tract']].getWcs()
-            patchBBox = skyMap[dataId['tract']][dataId['patch']].getOuterBBox()
-            patchCorners = patchWcs.pixelToSky(geom.Box2D(patchBBox).getCorners())
-            patchPolygon = afwGeom.Polygon(detectorWcs.skyToPixel(patchCorners))
-            if patchPolygon.intersection(detectorPolygon):
-                overlappingArea += patchPolygon.intersectionSingle(detectorPolygon).calculateArea()
-                if self.config.coaddName == 'dcr':
-                    self.log.info("Using template input tract=%s, patch=%s, subfilter=%s",
-                                  dataId['tract'], dataId['patch'], dataId['subfilter'])
-                    if dataId['patch'] in availableCoaddRefs:
-                        availableCoaddRefs[dataId['patch']].append(coaddRef)
-                    else:
-                        availableCoaddRefs[dataId['patch']] = [coaddRef, ]
-                else:
-                    self.log.info("Using template input tract=%s, patch=%s",
-                                  dataId['tract'], dataId['patch'])
-                    availableCoaddRefs[dataId['patch']] = coaddRef
-
-        if overlappingArea == 0:
+        if detectorWcs is None:
             templateExposure = None
             pixGood = 0
-            self.log.warning("No overlapping template patches found")
+            self.log.info("Exposure has no WCS, so cannot include in template.")
         else:
-            patchList = [tractInfo[patch] for patch in availableCoaddRefs.keys()]
-            templateExposure = self.run(tractInfo, patchList, detectorCorners, availableCoaddRefs,
-                                        visitInfo=exposure.getInfo().getVisitInfo())
-            # Count the number of pixels with the NO_DATA mask bit set
-            # counting NaN pixels is insufficient because pixels without data are often intepolated over)
-            pixNoData = np.count_nonzero(templateExposure.mask.array
-                                         & templateExposure.mask.getPlaneBitMask('NO_DATA'))
-            pixGood = templateExposure.getBBox().getArea() - pixNoData
-            self.log.info("template has %d good pixels (%.1f%%)", pixGood,
-                          100*pixGood/templateExposure.getBBox().getArea())
+            detectorBBox = exposure.getBBox()
+            detectorCorners = detectorWcs.pixelToSky(geom.Box2D(detectorBBox).getCorners())
+            validPolygon = exposure.getInfo().getValidPolygon()
+            detectorPolygon = validPolygon if validPolygon else geom.Box2D(detectorBBox)
+
+            availableCoaddRefs = dict()
+            overlappingArea = 0
+            for coaddRef in coaddExposureRefs:
+                dataId = coaddRef.dataId
+                patchWcs = skyMap[dataId['tract']].getWcs()
+                patchBBox = skyMap[dataId['tract']][dataId['patch']].getOuterBBox()
+                patchCorners = patchWcs.pixelToSky(geom.Box2D(patchBBox).getCorners())
+                patchPolygon = afwGeom.Polygon(detectorWcs.skyToPixel(patchCorners))
+                if patchPolygon.intersection(detectorPolygon):
+                    overlappingArea += patchPolygon.intersectionSingle(detectorPolygon).calculateArea()
+                    if self.config.coaddName == 'dcr':
+                        self.log.info("Using template input tract=%s, patch=%s, subfilter=%s",
+                                      dataId['tract'], dataId['patch'], dataId['subfilter'])
+                        if dataId['patch'] in availableCoaddRefs:
+                            availableCoaddRefs[dataId['patch']].append(coaddRef)
+                        else:
+                            availableCoaddRefs[dataId['patch']] = [coaddRef, ]
+                    else:
+                        self.log.info("Using template input tract=%s, patch=%s",
+                                      dataId['tract'], dataId['patch'])
+                        availableCoaddRefs[dataId['patch']] = coaddRef
+
+            if overlappingArea == 0:
+                templateExposure = None
+                pixGood = 0
+                self.log.warning("No overlapping template patches found")
+            else:
+                patchList = [tractInfo[patch] for patch in availableCoaddRefs.keys()]
+                templateExposure = self.run(tractInfo, patchList, detectorCorners, availableCoaddRefs,
+                                            visitInfo=exposure.getInfo().getVisitInfo())
+                # Count the number of pixels with the NO_DATA mask bit set.
+                # Counting NaN pixels is insufficient because pixels without
+                # data are often intepolated over.
+                pixNoData = np.count_nonzero(templateExposure.mask.array
+                                             & templateExposure.mask.getPlaneBitMask('NO_DATA'))
+                pixGood = templateExposure.getBBox().getArea() - pixNoData
+                self.log.info("template has %d good pixels (%.1f%%)", pixGood,
+                              100*pixGood/templateExposure.getBBox().getArea())
         return pipeBase.Struct(exposure=templateExposure, sources=None, area=pixGood)
 
     def getOverlapPatchList(self, exposure, skyMap):
@@ -588,12 +598,16 @@ class GetMultiTractCoaddTemplateTask(pipeBase.PipelineTask):
             patchWcs = inputs['skyMap'][dataId['tract']].getWcs()
             patchBBox = inputs['skyMap'][dataId['tract']][dataId['patch']].getOuterBBox()
             patchCorners = patchWcs.pixelToSky(geom.Box2D(patchBBox).getCorners())
-            patchPolygon = afwGeom.Polygon(inputs['wcs'].skyToPixel(patchCorners))
-            if patchPolygon.intersection(detectorPolygon):
-                overlappingArea += patchPolygon.intersectionSingle(detectorPolygon).calculateArea()
-                self.log.info("Using template input tract=%s, patch=%s" %
-                              (dataId['tract'], dataId['patch']))
-                coaddExposureList.append(coaddRef)
+            inputsWcs = inputs['wcs']
+            if inputsWcs is not None:
+                patchPolygon = afwGeom.Polygon(inputsWcs.skyToPixel(patchCorners))
+                if patchPolygon.intersection(detectorPolygon):
+                    overlappingArea += patchPolygon.intersectionSingle(detectorPolygon).calculateArea()
+                    self.log.info("Using template input tract=%s, patch=%s" %
+                                  (dataId['tract'], dataId['patch']))
+                    coaddExposureList.append(coaddRef)
+            else:
+                self.log.info("Exposure has no WCS, so cannot include in template.")
 
         if not overlappingArea:
             raise pipeBase.NoWorkFound('No patches overlap detector')
