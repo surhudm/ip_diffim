@@ -120,6 +120,12 @@ class AlardLuptonSubtractConfig(lsst.pipe.base.PipelineTaskConfig,
         "Setting to 0 will always attempt image subtraction"
     )
 
+    doSelectSources = lsst.pex.config.Field(
+        dtype=bool,
+        default=False,
+        doc="Select stars to use for kernel fitting (compatibility with Gen2 version)"
+    )
+
     def setDefaults(self):
         # defaults are OK for catalog and diacatalog
 
@@ -180,6 +186,10 @@ class AlardLuptonSubtractTask(lsst.pipe.base.PipelineTask):
             ``matchedTemplate`` : `lsst.afw.image.ExposureF`
                 The warped and PSF-matched template exposure.
         """
+        if self.config.doSelectSources:
+            # Compatibility option to maintain old functionality
+            # This should be removed in the future!
+            sources = None
         kernelSources = self.makeKernel.selectKernelSources(template, science,
                                                             candidateList=sources,
                                                             preconvolved=False)
