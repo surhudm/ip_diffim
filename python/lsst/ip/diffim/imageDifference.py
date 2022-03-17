@@ -23,6 +23,7 @@ import numpy as np
 
 import lsst.afw.image
 import lsst.afw.math
+import lsst.geom
 import lsst.pex.config
 import lsst.pipe.base
 from lsst.pipe.base import connectionTypes
@@ -186,6 +187,8 @@ class AlardLuptonSubtractTask(lsst.pipe.base.PipelineTask):
             ``matchedTemplate`` : `lsst.afw.image.ExposureF`
                 The warped and PSF-matched template exposure.
         """
+        self._validateSize(template, science)
+        self._validateWcs(template, science)
         if self.config.doSelectSources:
             # Compatibility option to maintain old functionality
             # This should be removed in the future!
@@ -242,7 +245,7 @@ class AlardLuptonSubtractTask(lsst.pipe.base.PipelineTask):
         matchedTemplate = _convolveExposure(template, kernel, self.convolutionControl,
                                             wcs=science.getWcs(),
                                             psf=science.getPsf(),
-                                            filterLabel=science.getFilterLabel(),
+                                            filterLabel=template.getFilterLabel(),
                                             photoCalib=science.getPhotoCalib())
         difference = _subtractImages(difference, science.maskedImage, matchedTemplate.maskedImage)
         self.finalize(matchedTemplate, science, difference, kernel, templateMatched=True)
@@ -325,6 +328,48 @@ class AlardLuptonSubtractTask(lsst.pipe.base.PipelineTask):
                                  spatiallyVarying=spatiallyVarying)
         else:
             self.log.info("NOT decorrelating image difference.")
+
+    def _validateSize(self, template, science):
+        """Return True if two image-like objects are the same size.
+        """
+        templateDims = template.getDimensions()
+        scienceDims = science.getDimensions()
+        if templateDims != scienceDims:
+            raise RuntimeError("Input images different size: template %s vs science %s",
+                               templateDims, scienceDims)
+
+    def _validateWcs(self, templateExposure, scienceExposure):
+        """Return True if the WCS of the two Exposures have the same origin and extent.
+        """
+        templateWcs = templateExposure.getWcs()
+        scienceWcs = scienceExposure.getWcs()
+        templateBBox = templateExposure.getBBox()
+        scienceBBox = scienceExposure.getBBox()
+
+        # LLC
+        templateOrigin = templateWcs.pixelToSky(lsst.geom.Point2D(templateBBox.getBegin()))
+        scienceOrigin = scienceWcs.pixelToSky(lsst.geom.Point2D(scienceBBox.getBegin()))
+
+        # URC
+        templateLimit = templateWcs.pixelToSky(lsst.geom.Point2D(templateBBox.getEnd()))
+        scienceLimit = scienceWcs.pixelToSky(lsst.geom.Point2D(scienceBBox.getEnd()))
+
+        self.log.info("Template Wcs : %f,%f -> %f,%f",
+                      templateOrigin[0], templateOrigin[1],
+                      templateLimit[0], templateLimit[1])
+        self.log.info("Science Wcs : %f,%f -> %f,%f",
+                      scienceOrigin[0], scienceOrigin[1],
+                      scienceLimit[0], scienceLimit[1])
+
+        templateBBox = lsst.geom.Box2D(templateOrigin.getPosition(lsst.geom.degrees),
+                                       templateLimit.getPosition(lsst.geom.degrees))
+        scienceBBox = lsst.geom.Box2D(scienceOrigin.getPosition(lsst.geom.degrees),
+                                      scienceLimit.getPosition(lsst.geom.degrees))
+        if not (templateBBox.overlaps(scienceBBox)):
+            raise RuntimeError("Input images do not overlap at all")
+
+        if ((templateOrigin != scienceOrigin) or (templateLimit != scienceLimit)):
+            raise RuntimeError("Template and science exposure WCS are not matched.")
 
 
 class AlardLuptonPreconvolveSubtractConnections(SubtractInputConnections,
