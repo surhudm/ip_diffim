@@ -696,7 +696,7 @@ class GetTemplateTask(pipeBase.PipelineTask):
         statsCtrl.setWeighted(True)
         statsCtrl.setCalcErrorFromInputVariance(True)
 
-        templateExposure = afwImage.ExposureF(tempBBox, finalWcs)
+        templateExposure = afwImage.ExposureF(finalBBox, finalWcs)
         templateExposure.maskedImage.set(np.nan, afwImage.Mask.getPlaneBitMask("NO_DATA"), np.nan)
         xy0 = templateExposure.getXY0()
         # Do not mask any values
