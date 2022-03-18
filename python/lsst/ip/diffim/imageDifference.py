@@ -240,15 +240,17 @@ class AlardLuptonSubtractTask(lsst.pipe.base.PipelineTask):
                 The warped and PSF-matched template exposure.
         """
         difference = science.clone()
-        kernel = self.makeKernel.run(template, science, sources, preconvolved=False).psfMatchingKernel
+        kernelRes = self.makeKernel.run(template, science, sources, preconvolved=False)
 
-        matchedTemplate = _convolveExposure(template, kernel, self.convolutionControl,
-                                            wcs=science.getWcs(),
-                                            psf=science.getPsf(),
-                                            filterLabel=template.getFilterLabel(),
-                                            photoCalib=science.getPhotoCalib())
-        difference = _subtractImages(difference, science.maskedImage, matchedTemplate.maskedImage)
-        self.finalize(matchedTemplate, science, difference, kernel, templateMatched=True)
+        matchedTemplate = self._convolveExposure(template, kernelRes.psfMatchingKernel,
+                                                 wcs=science.getWcs(),
+                                                 psf=science.getPsf(),
+                                                 filterLabel=template.getFilterLabel(),
+                                                 photoCalib=science.getPhotoCalib())
+        difference = _subtractImages(difference, science.maskedImage, matchedTemplate.maskedImage,
+                                     backgroundModel=kernelRes.backgroundModel)
+        self.finalize(matchedTemplate, science, difference, kernelRes.psfMatchingKernel,
+                      templateMatched=True)
 
         return lsst.pipe.base.Struct(difference=difference,
                                      matchedTemplate=matchedTemplate,
@@ -277,16 +279,19 @@ class AlardLuptonSubtractTask(lsst.pipe.base.PipelineTask):
                 The warped template exposure. Note that in this case, the template has not been PSF-matched.
         """
         difference = science.clone()
-        kernel = self.makeKernel.run(template, science, sources, preconvolved=False).psfMatchingKernel
+        kernelRes = self.makeKernel.run(template, science, sources, preconvolved=False).psfMatchingKernel
 
-        matchedScience = _convolveExposure(science, kernel, self.convolutionControl,
-                                           wcs=science.getWcs(),
-                                           psf=template.getPsf(),
-                                           filterLabel=science.getFilterLabel(),
-                                           photoCalib=science.getPhotoCalib())
+        matchedScience = self._convolveExposure(science, kernelRes.psfMatchingKernel,
+                                                wcs=science.getWcs(),
+                                                psf=template.getPsf(),
+                                                filterLabel=science.getFilterLabel(),
+                                                photoCalib=science.getPhotoCalib())
         difference = _subtractImages(difference, matchedScience.maskedImage, template.maskedImage,
-                                     psf=template.getPsf())
-        self.finalize(template, matchedScience, difference, kernel, templateMatched=False)
+                                     psf=template.getPsf(),
+                                     backgroundModel=kernelRes.backgroundModel)
+
+        self.finalize(template, matchedScience, difference, kernelRes.psfMatchingKernel,
+                      templateMatched=False)
 
         return lsst.pipe.base.Struct(difference=difference,
                                      matchedTemplate=template,
@@ -371,6 +376,46 @@ class AlardLuptonSubtractTask(lsst.pipe.base.PipelineTask):
         if ((templateOrigin != scienceOrigin) or (templateLimit != scienceLimit)):
             raise RuntimeError("Template and science exposure WCS are not matched.")
 
+    def _convolveExposure(self, exposure, kernel,
+                          wcs=None,
+                          psf=None,
+                          filterLabel=None,
+                          photoCalib=None):
+        """Convolve an exposure with the given kernel.
+
+        Parameters
+        ----------
+        exposure : `lsst.afw.Exposure`
+            The exposure to convolve.
+        kernel : `lsst.afw.math.LinearCombinationKernel`
+            PSF matching kernel computed in the ``makeKernel`` subtask.
+        wcs : `lsst.afw.geom.SkyWcs`, optional
+            Coordinate system definition (wcs) for the exposure.
+        psf : `lsst.afw.detection.Psf`, optional
+            Point spread function (PSF) to set for the convolved exposure.
+        filterLabel : `lsst.afw.image.FilterLabel`, optional
+            The filter label, set in the current instruments' obs package.
+        photoCalib : `lsst.afw.image.PhotoCalib`, optional
+            Calibration to convert instrumental flux and
+            flux error to nanoJansky.
+
+        Returns
+        -------
+        convolvedExp : `lsst.afw.Exposure`
+            The convolved image.
+        """
+        if wcs is None:
+            wcs = exposure.getWcs()
+        if psf is None:
+            psf = exposure.getPsf()
+        if filterLabel is None:
+            filterLabel = exposure.getFilterLabel()
+        if photoCalib is None:
+            photoCalib = exposure.getPhotoCalib()
+        convolvedImage = lsst.afw.image.MaskedImageF(exposure.getBBox())
+        lsst.afw.math.convolve(convolvedImage, exposure.maskedImage, kernel, self.convolutionControl)
+        return _makeExposure(convolvedImage, wcs, psf, filterLabel, photoCalib)
+
 
 class AlardLuptonPreconvolveSubtractConnections(SubtractInputConnections,
                                                 SubtractLikelihoodOutputConnections):
@@ -444,14 +489,14 @@ class AlardLuptonPreconvolveSubtractTask(AlardLuptonSubtractTask):
         psfAvgPos = science.psf.getAveragePosition()
         preconvolveKernel = science.psf.getLocalKernel(psfAvgPos)
         scoreExposure = science.clone()
-        convolvedScience = self._convolveExposure(science, preconvolveKernel, self.convolutionControl)
+        convolvedScience = self._convolveExposure(science, preconvolveKernel)
 
-        kernel = self.makeKernel.run(template, convolvedScience, sources, preconvolved=True).psfMatchingKernel
+        kernelRes = self.makeKernel.run(template, convolvedScience, sources, preconvolved=True)
 
         self.log.info("Preconvolving science image, and convolving template image")
-        matchedTemplate = self._convolveExposure(template, kernel, self.convolutionControl)
+        matchedTemplate = self._convolveExposure(template, kernelRes.psfMatchingKernel)
         scoreExposure = _subtractImages(scoreExposure, convolvedScience, matchedTemplate)
-        self.finalize(matchedTemplate, science, scoreExposure, kernel,
+        self.finalize(matchedTemplate, science, scoreExposure, kernelRes.psfMatchingKernel,
                       templateMatched=True,
                       preConvMode=True,
                       preConvKernel=preconvolveKernel)
@@ -512,50 +557,7 @@ def checkTemplateIsSufficient(templateExposure, logger, requiredTemplateFraction
         raise lsst.pipe.base.NoWorkFound(message)
 
 
-def _convolveExposure(exposure, kernel, convolutionControl,
-                      wcs=None,
-                      psf=None,
-                      filterLabel=None,
-                      photoCalib=None):
-    """Convolve an exposure with the given kernel.
-
-    Parameters
-    ----------
-    exposure : `lsst.afw.Exposure`
-        The exposure to convolve.
-    kernel : `lsst.afw.math.LinearCombinationKernel`
-        PSF matching kernel computed in the ``makeKernel`` subtask.
-    convolutionControl : lsst.afw.math.ConvolutionControl
-        Settings for the convolution.
-    wcs : `lsst.afw.geom.SkyWcs`, optional
-        Coordinate system definition (wcs) for the exposure.
-    psf : `lsst.afw.detection.Psf`, optional
-        Point spread function (PSF) to set for the convolved exposure.
-    filterLabel : `lsst.afw.image.FilterLabel`, optional
-        The filter label, set in the current instruments' obs package.
-    photoCalib : `lsst.afw.image.PhotoCalib`, optional
-        Calibration to convert instrumental flux and
-        flux error to nanoJansky.
-
-    Returns
-    -------
-    convolvedExp : `lsst.afw.Exposure`
-        The convolved image.
-    """
-    if wcs is None:
-        wcs = exposure.getWcs()
-    if psf is None:
-        psf = exposure.getPsf()
-    if filterLabel is None:
-        filterLabel = exposure.getFilterLabel()
-    if photoCalib is None:
-        photoCalib = exposure.getPhotoCalib()
-    convolvedImage = lsst.afw.image.MaskedImageF(exposure.getBBox())
-    lsst.afw.math.convolve(convolvedImage, exposure.maskedImage, kernel, convolutionControl)
-    return _makeExposure(convolvedImage, wcs, psf, filterLabel, photoCalib)
-
-
-def _subtractImages(differenceExp, science, template, psf=None):
+def _subtractImages(differenceExp, science, template, psf=None, backgroundModel=None):
     """Subtract template from science, propagating relevant metadata.
 
     Parameters
@@ -568,6 +570,8 @@ def _subtractImages(differenceExp, science, template, psf=None):
         The template to subtract from the science image.
     psf : `lsst.afw.detection.Psf`, optional
         The PSF to set for the difference image.
+    backgroundModel : `lsst.afw.MaskedImage`, optional
+        Differential background model
 
     Returns
     -------
@@ -575,6 +579,8 @@ def _subtractImages(differenceExp, science, template, psf=None):
         The subtracted image.
     """
     differenceExp.maskedImage = science
+    if backgroundModel is not None:
+        science -= backgroundModel
     science -= template
     if psf is not None:
         differenceExp.setPsf(psf)
