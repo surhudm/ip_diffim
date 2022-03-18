@@ -290,6 +290,9 @@ class AlardLuptonSubtractTask(lsst.pipe.base.PipelineTask):
                                      psf=template.getPsf(),
                                      backgroundModel=kernelRes.backgroundModel)
 
+        # Place back on native photometric scale
+        difference.maskedImage /= kernelRes.psfMatchingKernel.computeImage(
+            lsst.afw.image.ImageD(kernelRes.psfMatchingKernel.getDimensions()), False)
         self.finalize(template, matchedScience, difference, kernelRes.psfMatchingKernel,
                       templateMatched=False)
 
